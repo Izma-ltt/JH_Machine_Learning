@@ -1,0 +1,199 @@
+---
+title: "ML_Assignment_HAR"
+author: "Izma"
+date: "17 January 2020"
+output:
+  html_document: default
+  pdf_document: default
+---
+
+The report aims to present analysis on the best approach to determine whether a person is doing an exercise correctly by using readings from wearable accelerometers, put on either the belt, arm, forearm or the dumbbell of the participants from the Human Activity Recognition project (HAR). There are 5 possible classes that each exercise can be classified into: A) exactly according to the specification; B) throwing the elbows to the front; C) lifting the dumbbell only halfway; D) lowering the dumbbell only halfway; and E) throwing the hips to the front.
+
+Please see the below link for more details on the HAR project: http://web.archive.org/web/20161224072740/http:/groupware.les.inf.puc-rio.br/har 
+
+The below report is divided into the following segments:
+1) Data cleaning, Pre-processing and Partitioning
+2) Models Comparison
+3) Out-of-sample testing
+4) Final Testing
+5) Conclusion
+6) Appendix
+
+The report does not show the code used for analysis due to intensity of the calculations, but is available on Github
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE, include=FALSE  )
+
+## load packages
+library(randomForest)
+library(caret)
+library(parallel)
+library(ggplot2)
+library(rpart)
+library(rpart.plot)
+library(rattle)
+library(RANN)  # required for knnInpute
+library(gridExtra)
+require(parallel)
+require(doParallel)
+
+```
+
+## Data cleaning, preprocessing and partitioning
+
+Prior to any model application data needs to be cleaned and prepared, ensuring the model is based on variables that contain the most information. Thus the following procedures were applied:
+- All irrelevant variables were excluded, e.g. name of the participant, time, date...
+- All variables with over 95% of missing values were excluded
+- All variables with near zero variance were excluded
+
+This approach reduced the number of variables from 160 to 53, which are all continuous except for the classification variable (Classe). Remaining variables were pre-processed to account for missing values, by applying the k-nearest neighbours approach, after which data was normalized so all variables implicitly have the same weight.
+
+Finally, data was partitioned into training and test sets (80% and 20% respectively), in order to calculate out-of-sample error before applying the model on the final test data.
+
+```{r data_preparation, echo = FALSE, include=FALSE, cache = TRUE }
+temp <- tempfile()
+download.file( "https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv",temp)
+data <- read.csv( temp )
+
+na_count   <- sapply( data, function(y) (  sum( length( which( y == "#DIV/0!")))
+                                         + sum( length( which( y == "NA"     )))
+                                         + sum( length( which( is.na( y )    )))
+                                         + sum( length( which( is.null( y )  )))
+                                         + sum( length( which( y == ""       )))
+                                        ) / length( y )
+                                        )
+
+data_final <- data[, na_count < 0.95 ]
+data_final <- data_final[,8:60]
+data_final <- data_final[ !nearZeroVar(data_final, saveMetrics=TRUE)$nzv ]
+
+set.seed( 5 )
+preProcess_missingdata <- preProcess( data_final, method = "knnImpute" )
+final                  <- predict(preProcess_missingdata, newdata = data_final )
+
+classe                 <- final$classe
+preProcess_range_model <- preProcess( final[, 0 :52 ], method = 'range')
+final                  <- predict(preProcess_range_model, newdata = final )
+final$classe           <- classe
+
+train_index <- createDataPartition( final$classe, p = 0.8, times = 1, list = FALSE )
+train_data  <- as.data.frame( final[ train_index, ] )
+test_train  <- as.data.frame( final[ -train_index, ] )
+
+```
+
+## Model Comparison
+
+The next step was to test several models and see which approach best suits the aim of this research:
+1) Random Forest (RF)
+2) Stochastic Gradient Boosting (GBM)
+3) K-Nearest Neighbours (KNN)
+
+The choice of algorithms was based on the Coursera class, but it also includes K-Nearest Neighbours algorithm. Random forest and Stohastic Gradient Boosting algorithms were chosen due to high number of available variables, which are also relatively related to each other (reading from the same device or show a different aspect of a specific movement of the same body part or dumbbell). KNN algorithm was selected due to it being easy to interpret output, lower calculation time and high predictive power.
+
+Further, each model was also tuned as decision trees, especially random forest algorithms have a tendency of overfitting, so repeated k-fold cross validation method was used. Thus the best performing model was identified within each machine learning algorithm, i.e. the best combination of algorithm parameters were calculated. The repeated k-fold cross validation method was used with 10 repeats and 5 folds, i.e.5 variables randomly sampled as candidates at each split. The appendix shows each of the three models' results of the repeated cross validation with tuning. In case of random forests an increase of up to ~30 variables increases the accuracy, only to fall afterwards. K-nearest neighbours algorithm shows similar features, with accuracy reducing with using more neighbours for calculations. Only in the case of SVM model does the accuracy increases with costs.
+
+```{r model_fitting, echo = FALSE, include=FALSE, cache = TRUE }
+n_Cores <- detectCores() - 1
+n_Cluster <- makeCluster(n_Cores)
+registerDoParallel(n_Cluster)
+
+control <- trainControl( method          = "repeatedcv",
+                         number          = 5,
+                         repeats         = 10,
+                         classProbs      = TRUE,
+                         savePredictions = TRUE,
+                         allowParallel   = TRUE,
+                       )
+
+rf_fit  <- train(classe~., method = "rf", data = train_data,  trControl = control )
+
+knn_fit <- train(classe~., method = "knn", data = train_data,  trControl = control )
+
+gbm_fit <- train(classe~., method = "gbm", data = train_data,  trControl = control )
+
+stopCluster(n_Cluster)
+registerDoSEQ()
+
+```
+
+Thus, on 50 resamples of the 3 models the accuracy and Kappa measures were calculated, as per below comparison summary tables. Random forest algorithm performs better than both other models with a median accuracy of 99% vs. 96% for GBM and 94% for KNN.
+
+```{r model_comparison, include = TRUE, echo = TRUE }
+
+models_compare <- resamples( list( RF = rf_fit, GBM = gbm_fit, KNN = knn_fit ))
+summary(models_compare)
+
+scales      <- list( x = list( relation = "free" ), y = list( relation = "free" ) )
+bwplot( models_compare, scales = scales )
+
+```
+
+Therefore, the best model to use for this specific research aim is Random forest. Following analysis will focus on random forest model specifically. As per below confusion matrix, classification was 99% accurate with only a few marginal misclassifications for all classes other than A (exercise performed correctly).
+
+```{r final_model_cm, include = TRUE, echo = TRUE }
+rf_fit
+confusionMatrix.train( rf_fit )
+
+```
+
+Finally, looking at the model itself and the importance the final random forest model gives to each used variable we can see that roll_belt variable is by far the most important with importance level at almost 100, followed by pitch_forearm and yaw_bell both with importance level over 50. As mentioned before and shown in the appendix, accuracy increases with additon of new variables up to ~30 variables, and then starts reducing. This implies that variables with importance less than roughly 5 are not adding as much information to the model.
+
+```{r final_model, include = TRUE, echo = TRUE }
+
+imp_var_rf <- varImp(rf_fit)
+g2_rf      <- ggplot(imp_var_rf, colour = "blue")
+g2_rf      <- g2_rf + ggtitle( "Variable Importance with Random Forest" )
+g2_rf
+
+```
+
+## Out-of-sample testing
+
+Next, out-of-sample analysis was performed on the partitioned test data. The below summary shows results for random forest only, however all three models were checked for out-of-sample error and random forest still showed the best results.
+
+Accuracy of the out-of-sample classification is 99.6%, with NIR at only 28.5% (reflecting that the majority of inputs are in class A, 1116 of 3923); which is significantly lower than the accuracy at a 0.01 p level. Further, Kappa statistic is close to 1, implying a good relation between expected and observed accuracy.
+
+If we look at sensitivity and specificity, we can conclude that we will correctly identify true positives and true negatives (respectively) at over 99% level, which can also be seen from the confusion matrix itself with very few incorrectly classified classes.
+
+```{r oos_testing, include = TRUE, echo = TRUE, cache = TRUE  }
+
+predict_train_rf  <- predict( rf_fit, test_train, type = "raw" )
+confusionMatrix( predict_train_rf, test_train$classe )
+
+predict_train_gbm <- predict( gbm_fit, test_train, type = "raw" )
+## confusionMatrix( predict_train_gbm, test_train$classe )
+
+predict_train_knn <- predict( knn_fit, test_train, type = "raw" )
+## confusionMatrix( predict_train_knn, test_train$classe )
+
+```
+
+## Conclusion
+
+As expected Random forest model shows the best performance in terms of accuracy, however it is also the most computationally expensive model. Due to the k-fold cross validation process we applied before choosing the random forest the out-of-sample analysis shows that the model is not overfitting to the training set specifically, since we kept the high level of accuracy here as well.
+
+Other models like gradient boosting can also be used here with relatively high level of accuracy (96%) with smaller computational costs. Thus, the final choice of model should be dependent on both of these aspects costs vs. accuracy.
+
+## Appendix
+
+```{r plots, include = TRUE, echo = TRUE }
+
+g1_rf      <- ggplot(rf_fit) + ggtitle( "RF accuracy vs. mtry" )
+## grid.arrange( g1_rf, g2_rf, ncol=2 )
+
+g1_gbm      <- ggplot( gbm_fit ) + ggtitle( "GBM accuracy vs. mtry" ) + theme( legend.position = "bottom")
+## imp_var_gbm <- varImp( gbm_fit)
+## g2_gbm      <- ggplot(imp_var_gbm, colour = "blue")
+## g2_gbm      <- g2_svm + ggtitle( "Variable Importance with Stohastic Gradient Boost" )
+## grid.arrange( g1_gbm, g2_gbm, ncol=2 )
+
+g1_knn      <- ggplot( knn_fit ) + ggtitle( "KNN accuracy vs. mtry" )
+imp_var_knn <- varImp( knn_fit )
+g2_knn      <- ggplot(imp_var_knn, colour = "blue" )
+g2_knn      <- g2_knn + ggtitle( "Variable Importance with K-Nearest Neighbours" )
+## grid.arrange( g1_knn, g2_knn, ncol=2 )
+
+grid.arrange( g1_rf, g1_knn, g1_gbm, ncol=3 )
+
+```
